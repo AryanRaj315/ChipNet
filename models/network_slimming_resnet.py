@@ -73,7 +73,7 @@ class resnet(BaseModel):
         if hasattr(self.bn, 'is_imp'):
             self.bn.is_imp = True
         self.relu = nn.ReLU(inplace=True)
-        self.avgpool = nn.AvgPool2d(8)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
 
         self.fc = nn.Linear(cfg[-1], num_classes)
 

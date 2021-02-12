@@ -1,11 +1,11 @@
 import os
-
 import torch
 import torch.utils.data as data
 from torch.utils.data.sampler import SubsetRandomSampler
 from torchvision import transforms, datasets
 from torchvision.datasets import CIFAR10, CIFAR100, SVHN
 from .tinyimagenet import TinyImageNet
+from .imagenet import ImageNet
 from sklearn.model_selection import train_test_split
 import numpy as np
 
@@ -16,8 +16,8 @@ class DataManager:
         self.workers = args.workers
         self.valid_size = args.valid_size
         self.num_train = 0
-        self.num_classes = {'c10': 10, 'c100': 100, 'tin': 200, 'svhn': 10}[self.dataset_name]
-        self.insize = {'c10': 32, 'c100': 32, 'tin': 64, 'svhn': 32}[self.dataset_name]
+        self.num_classes = {'c10': 10, 'c100': 100, 'tin': 200, 'svhn': 10, 'imagenet': 1000}[self.dataset_name]
+        self.insize = {'c10': 32, 'c100': 32, 'tin': 64, 'svhn': 32, 'imagenet': 224}[self.dataset_name]
 
     def prepare_data(self):
         print('... Preparing data ...')
@@ -69,7 +69,7 @@ class DataManager:
             testset = SVHN(root='./data', split='test', download=True,
                                                 transform=val_transform)
             
-        else:
+        elif self.dataset_name == 'tiny':
             norm_mean = [0.485, 0.456, 0.406]
             norm_std = [0.229, 0.224, 0.225]
             norm_transform = transforms.Normalize(norm_mean, norm_std)
@@ -86,17 +86,36 @@ class DataManager:
             trainset = TinyImageNet('./data', train=True, transform=train_transform)
             valset = TinyImageNet('./data', train=True, transform=val_transform)
             testset = TinyImageNet('./data', train=False, transform=val_transform)
+            
+        else:
+                        
+            normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
 
-        self.num_train = len(trainset)
-        train_idx, val_idx = self.get_split()
-        train_sampler = SubsetRandomSampler(train_idx)
-        val_sampler = SubsetRandomSampler(val_idx)
-        train_loader = data.DataLoader(trainset, self.batch_size, num_workers=self.workers,
-                                       sampler=train_sampler, pin_memory=True)
-        val_loader = data.DataLoader(valset, self.batch_size, num_workers=self.workers, sampler=val_sampler,
-                                     pin_memory=True)
-        test_loader = data.DataLoader(testset, self.batch_size, num_workers=self.workers, shuffle=False,
-                                     pin_memory=False)
+            train_transform = transforms.Compose([
+                    transforms.RandomResizedCrop(224),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    normalize,
+                ])
+            val_transform = transforms.Compose([
+            transforms.Resize(256),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            normalize,
+            ])
+            trainset = ImageNet('../', train = True, transform = train_transform)
+            valset = ImageNet('../', train = False, transform = val_transform)
+            testset = ImageNet('../', train = False, transform = val_transform)
+
+#         self.num_train = len(trainset)
+#         train_idx, val_idx = self.get_split()
+#         train_sampler = SubsetRandomSampler(train_idx)
+#         val_sampler = SubsetRandomSampler(val_idx)
+        print(len(trainset))
+        train_loader = data.DataLoader(trainset, batch_size = self.batch_size, num_workers=self.workers, shuffle = True, pin_memory=True)
+        val_loader = data.DataLoader(valset, self.batch_size, num_workers=self.workers, shuffle = False, pin_memory=True)
+        test_loader = data.DataLoader(testset, self.batch_size, num_workers=self.workers, shuffle=False, pin_memory=False)
         return train_loader, val_loader, test_loader
 
     def get_split(self):

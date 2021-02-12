@@ -1,6 +1,5 @@
-import argparse
 import os
-
+import argparse
 import torch
 import numpy as np
 import pandas as pd
@@ -15,7 +14,7 @@ from datasets import DataManager
 seed_everything(43)
 
 ap = argparse.ArgumentParser(description='pruning with heaviside continuous approximations and logistic curves')
-ap.add_argument('dataset', choices=['c10', 'c100', 'tin','svhn'], type=str, help='Dataset choice')
+ap.add_argument('dataset', choices=['c10', 'c100', 'tin','svhn', 'imagenet'], type=str, help='Dataset choice')
 ap.add_argument('model', type=str, help='Model choice')
 ap.add_argument('--budget_type', choices=['channel_ratio', 'volume_ratio','parameter_ratio','flops_ratio'], default='channel_ratio', type=str, help='Budget Type')
 ap.add_argument('--Vc', default=0.25, type=float, help='Budget Constraint')
@@ -48,10 +47,11 @@ dataloaders = {
 }
 
 ############################### preparing model ###################################
-
+print(data_object.num_classes, data_object.insize)
 model = get_model(args.model, 'prune', data_object.num_classes, data_object.insize)
-state = torch.load(f"checkpoints/{args.model}_{args.dataset}_pretrained.pth")
-model.load_state_dict(state['state_dict'], strict=False)
+# state = torch.load(f"checkpoints/{args.model}_{args.dataset}_pretrained.pth")
+# state = torch.load("../resnet152-b121ed2d.pth")
+# model.load_state_dict(state['state_dict'], strict=False)
 
 ############################### preparing for pruning ###################################
 
