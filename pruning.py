@@ -51,7 +51,7 @@ print(data_object.num_classes, data_object.insize)
 model = get_model(args.model, 'prune', data_object.num_classes, data_object.insize)
 # state = torch.load(f"checkpoints/{args.model}_{args.dataset}_pretrained.pth")
 # state = torch.load("../resnet152-b121ed2d.pth")
-# model.load_state_dict(state['state_dict'], strict=False)
+# model.load_state_dict(state, strict=False)
 
 ############################### preparing for pruning ###################################
 
