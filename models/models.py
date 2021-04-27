@@ -1,6 +1,7 @@
 from .resnet import get_resnet_model
 from .network_slimming_resnet import get_network_slimming_model
 from .mobilenet import get_mobilenet
+from .pre_resnet import PreActResNet152
 def get_model(model, method, num_classes, insize):
     """Returns the requested model, ready for training/pruning with the specified method.
 
@@ -16,4 +17,6 @@ def get_model(model, method, num_classes, insize):
         net = get_network_slimming_model(method, num_classes)
     elif model in ['mobilenetv2']:
         net = get_mobilenet(model, method, num_classes)
+    elif model in ['r152']:
+        net = PreActResNet152(num_classes)
     return net

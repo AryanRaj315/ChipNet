@@ -17,7 +17,7 @@ ap = argparse.ArgumentParser(description='pruning with heaviside continuous appr
 ap.add_argument('dataset', choices=['c10', 'c100', 'tin','svhn', 'imagenet'], type=str, help='Dataset choice')
 ap.add_argument('model', type=str, help='Model choice')
 ap.add_argument('--budget_type', choices=['channel_ratio', 'volume_ratio','parameter_ratio','flops_ratio'], default='channel_ratio', type=str, help='Budget Type')
-ap.add_argument('--Vc', default=0.25, type=float, help='Budget Constraint')
+ap.add_argument('--Vc', default=0.5, type=float, help='Budget Constraint')
 ap.add_argument('--batch_size', default=32, type=int, help='Batch Size')
 ap.add_argument('--epochs', default=20, type=int, help='Epochs')
 ap.add_argument('--workers', default=0, type=int, help='Number of CPU workers')

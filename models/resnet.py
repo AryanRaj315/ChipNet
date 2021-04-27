@@ -1,290 +1,247 @@
-import math
 import torch
+from torch import Tensor
 import torch.nn as nn
+from torch.hub import load_state_dict_from_url
+from typing import Type, Any, Callable, Union, List, Optional
+
+import math
 from .layers import ModuleInjection, PrunableBatchNorm2d
 from .base_model import BaseModel
 import numpy as np
 
 
-def conv3x3(in_planes, out_planes, stride=1):
+__all__ = ['ResNet', 'resnet18', 'resnet34', 'resnet50', 'resnet101',
+           'resnet152', 'resnext50_32x4d', 'resnext101_32x8d',
+           'wide_resnet50_2', 'wide_resnet101_2']
+
+
+model_urls = {
+    'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'resnet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth',
+    'resnext50_32x4d': 'https://download.pytorch.org/models/resnext50_32x4d-7cdf4587.pth',
+    'resnext101_32x8d': 'https://download.pytorch.org/models/resnext101_32x8d-8ba56ff5.pth',
+    'wide_resnet50_2': 'https://download.pytorch.org/models/wide_resnet50_2-95faca4d.pth',
+    'wide_resnet101_2': 'https://download.pytorch.org/models/wide_resnet101_2-32ee1156.pth',
+}
+
+
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
     """3x3 convolution with padding"""
-    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride, padding=1, bias=False)
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=dilation, groups=groups, bias=False, dilation=dilation)
+
+
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
 
 class BasicBlock(nn.Module):
-    expansion = 1
+    expansion: int = 1
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
         super(BasicBlock, self).__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError('BasicBlock only supports groups=1 and base_width=64')
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
         self.conv1 = conv3x3(inplanes, planes, stride)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.activ = nn.ReLU(inplace=True)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
         self.conv2 = conv3x3(planes, planes)
-        self.bn2 = nn.BatchNorm2d(planes)
+        self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
 
-        self.conv1, self.bn1 = ModuleInjection.make_prunable(self.conv1, self.bn1)
-        self.conv2, self.bn2 = ModuleInjection.make_prunable(self.conv2, self.bn2)
-
-    def forward(self, x):
-        residual = x
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.activ(out)
+        out = self.relu(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
 
         if self.downsample is not None:
-            residual = self.downsample(x)
+            identity = self.downsample(x)
 
-        out += residual
-        out = self.activ(out)
+        out += identity
+        out = self.relu(out)
 
         return out
 
-class Bottleneck(nn.Module):
-    expansion = 4
 
-    def __init__(self, inplanes, planes, stride=1, downsample=None):
+class Bottleneck(nn.Module):
+    # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
+    # while original implementation places the stride at the first 1x1 convolution(self.conv1)
+    # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
+    # This variant is also known as ResNet V1.5 and improves accuracy according to
+    # https://ngc.nvidia.com/catalog/model-scripts/nvidia:resnet_50_v1_5_for_pytorch.
+
+    expansion: int = 4
+
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
         super(Bottleneck, self).__init__()
-        self.conv1 = nn.Conv2d(inplanes, planes, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.conv3 = nn.Conv2d(planes, planes * self.expansion, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.activ = nn.ReLU(inplace=True)
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
-
+        
         self.conv1, self.bn1 = ModuleInjection.make_prunable(self.conv1, self.bn1)
         self.conv2, self.bn2 = ModuleInjection.make_prunable(self.conv2, self.bn2)
         self.conv3, self.bn3 = ModuleInjection.make_prunable(self.conv3, self.bn3)
 
-    def forward(self, x):
-        residual = x
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
 
         out = self.conv1(x)
         out = self.bn1(out)
-        out = self.activ(out)
+        out = self.relu(out)
 
         out = self.conv2(out)
         out = self.bn2(out)
-        out = self.activ(out)
+        out = self.relu(out)
 
         out = self.conv3(out)
         out = self.bn3(out)
 
         if self.downsample is not None:
-            residual = self.downsample(x)
+            identity = self.downsample(x)
 
-        out += residual
-        out = self.activ(out)
+        out += identity
+        out = self.relu(out)
 
         return out
 
-class ResNetCifar(BaseModel):
-    def __init__(self, block, layers, width=1, num_classes=1000, insize=32):
-        super(ResNetCifar, self).__init__()
-        self.inplanes = 16
-        self.insize = insize
-        self.layers_size = layers
-        self.num_classes = num_classes
-        self.width = width
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.conv1, self.bn1 = ModuleInjection.make_prunable(self.conv1, self.bn1)
-        self.prev_module[self.bn1]=None
-        self.activ = nn.ReLU(inplace=True)
-        self.layer1 = self._make_layer(block, 16 * width, layers[0])
-        self.layer2 = self._make_layer(block, 32 * width, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 64 * width, layers[2], stride=2)
-        self.avgpool = nn.AdaptiveAvgPool2d(output_size=1)
-        self.fc = nn.Linear(64 * width, num_classes)
-        self.init_weights()
 
-        assert block is BasicBlock
-        prev = self.bn1
-        for l_block in [self.layer1, self.layer2, self.layer3]:
-            for b in l_block:
-                self.prev_module[b.bn1] = prev
-                self.prev_module[b.bn2] = b.bn1
-                if b.downsample is not None:
-                    self.prev_module[b.downsample[1]] = prev
-                prev = b.bn2
-                
-
-    def _make_layer(self, block, planes, blocks, stride=1):
-        downsample = None
-        if stride != 1 or self.inplanes != planes * block.expansion:
-            conv_module = nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False)
-            bn_module = nn.BatchNorm2d(planes * block.expansion)
-            conv_module, bn_module = ModuleInjection.make_prunable(conv_module, bn_module)
-            if hasattr(bn_module, 'is_imp'):
-                bn_module.is_imp = True
-            downsample = nn.Sequential(conv_module, bn_module)
-
-        layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
-        self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
-
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.activ(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-        
-        return x
-
-    def removable_orphans(self):
-        num_removed = 0
-        for l_blocks in [self.layer1, self.layer2, self.layer3]:
-            for b in l_blocks:
-                m1, m2 = b.bn1, b.bn2
-                if self.is_all_pruned(m1) or self.is_all_pruned(m2):
-                    num_removed += self.n_remaining(m1) + self.n_remaining(m2)
-        return num_removed
-
-    def remove_orphans(self):
-        num_removed = 0
-        for l_blocks in [self.layer1, self.layer2, self.layer3]:
-            for b in l_blocks:
-                m1, m2 = b.bn1, b.bn2
-                if self.is_all_pruned(m1) or self.is_all_pruned(m2):
-                    num_removed += self.n_remaining(m1) + self.n_remaining(m2)
-                    m1.pruned_zeta.data.copy_(torch.zeros_like(m1.pruned_zeta))
-                    m2.pruned_zeta.data.copy_(torch.zeros_like(m2.pruned_zeta))
-        return num_removed
-
-    def __calc_params(self, a):
-        ans = a[0]*a[1]*9
-        current_loc = 2
-        current_max = a[1]
-        downsample_n = a[2]
-        do_downsample = True if self.width>1 else False
-        for l in self.layers_size:
-            for i in range(l):
-                if do_downsample:
-                    downsample_n = a[current_loc]
-                    ans+=current_max*a[current_loc]
-                    current_loc+=1
-            
-                ans+=current_max*a[current_loc]*9
-                ans+=a[current_loc]*a[current_loc+1]*9
-                if do_downsample:
-                    current_max = max(downsample_n, a[current_loc+1])
-                else:
-                    current_max = max(current_max, a[current_loc+1])
-                do_downsample = False
-                current_loc+=2
-            do_downsample = True
-        return ans + a[-1]*self.num_classes + 2*np.sum(a)
-
-    def __calc_flops(self, a):
-        ans=a[0]*a[1]*9*self.insize**2 + a[1]*self.insize**2
-        current_loc = 2
-        current_max = a[1]
-        downsample_n = a[2]
-        size = self.insize*2
-        do_downsample = True if self.width>1 else False
-        for l in self.layers_size:
-            for i in range(l):
-                if do_downsample:
-                    downsample_n = a[current_loc]
-                    size = size//2
-                    ans+=(current_max+1)*a[current_loc]*size**2 
-                    current_loc+=1
-            
-                ans+=current_max*a[current_loc]*9*size**2 + a[current_loc]*size**2
-                ans+=a[current_loc]*a[current_loc+1]*9*size**2 + a[current_loc+1]*size**2
-                if do_downsample:
-                    current_max = max(downsample_n, a[current_loc+1])
-                else:
-                    current_max = max(current_max, a[current_loc+1])
-                do_downsample = False
-                current_loc+=2
-            do_downsample = True
-        return 2*ans + 2*(current_max-1)*100
-
-    def params(self):
-        a = [3]
-        b = [3]
-        for i in self.prunable_modules:
-            a.append(int(i.pruned_zeta.sum()))
-            b.append(len(i.pruned_zeta))
-        return self.__calc_params(a)/self.__calc_params(b)
-                
-
-    def flops(self):
-        a = [3]
-        b = [3]
-        for i in self.prunable_modules:
-            a.append(int(i.pruned_zeta.sum()))
-            b.append(len(i.pruned_zeta))
-        return self.__calc_flops(a)/self.__calc_flops(b)
-    
 class ResNet(BaseModel):
-    def __init__(self, block, layers, width=1, num_classes=1000, produce_vectors=False, init_weights=True, insize=32):
+
+    def __init__(
+        self,
+        block: Type[Union[BasicBlock, Bottleneck]],
+        layers: List[int],
+        num_classes: int = 1000,
+        zero_init_residual: bool = False,
+        groups: int = 1,
+        width_per_group: int = 64,
+        replace_stride_with_dilation: Optional[List[bool]] = None,
+        norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
         super(ResNet, self).__init__()
-        self.produce_vectors = produce_vectors
-        self.block_type = block.__class__.__name__
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+
         self.inplanes = 64
-        if insize<128:
-            self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        else:
-            self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.dilation = 1
+        if replace_stride_with_dilation is None:
+            # each element in the tuple indicates if we should replace
+            # the 2x2 stride with a dilated convolution instead
+            replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError("replace_stride_with_dilation should be None "
+                             "or a 3-element tuple, got {}".format(replace_stride_with_dilation))
+        self.groups = groups
+        self.base_width = width_per_group
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = norm_layer(self.inplanes)
         self.conv1, self.bn1 = ModuleInjection.make_prunable(self.conv1, self.bn1)
-        self.activ = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64 * width, layers[0])
-        self.layer2 = self._make_layer(block, 128 * width, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256 * width, layers[2], stride=2)
-        self.layer4 = self._make_layer(block, 512 * width, layers[3], stride=2)
-        self.avgpool = nn.AdaptiveAvgPool2d(output_size=1)  # Global Avg Pool
-        self.fc = nn.Linear(512 * block.expansion * width, num_classes)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2,
+                                       dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2,
+                                       dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
+                                       dilate=replace_stride_with_dilation[2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
 
-        self.init_weights()
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
 
-        for l in [self.layer1, self.layer2, self.layer3, self.layer4]:
-            for b in l.children():
-                downs = next(b.downsample.children()) if b.downsample is not None else None
+        # Zero-initialize the last BN in each residual branch,
+        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
+        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
+        if zero_init_residual:
+            for m in self.modules():
+                if isinstance(m, Bottleneck):
+                    nn.init.constant_(m.bn3.weight, 0)  # type: ignore[arg-type]
+                elif isinstance(m, BasicBlock):
+                    nn.init.constant_(m.bn2.weight, 0)  # type: ignore[arg-type]
 
-    def _make_layer(self, block, planes, blocks, stride=1):
+    def _make_layer(self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
+                    stride: int = 1, dilate: bool = False) -> nn.Sequential:
+        norm_layer = self._norm_layer
         downsample = None
+        previous_dilation = self.dilation
+        if dilate:
+            self.dilation *= stride
+            stride = 1
         if stride != 1 or self.inplanes != planes * block.expansion:
-            conv_module = nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False)
-            bn_module = nn.BatchNorm2d(planes * block.expansion)
-            conv_module, bn_module = ModuleInjection.make_prunable(conv_module, bn_module)
-            if hasattr(bn_module, 'is_imp'):
-                bn_module.is_imp = True
-            downsample = nn.Sequential(conv_module, bn_module)
+            downsample = nn.Sequential(
+                conv1x1(self.inplanes, planes * block.expansion, stride),
+                norm_layer(planes * block.expansion),
+            )
 
         layers = []
-        layers.append(block(self.inplanes, planes, stride, downsample))
+        layers.append(block(self.inplanes, planes, stride, downsample, self.groups,
+                            self.base_width, previous_dilation, norm_layer))
         self.inplanes = planes * block.expansion
-        for i in range(1, blocks):
-            layers.append(block(self.inplanes, planes))
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes, groups=self.groups,
+                                base_width=self.base_width, dilation=self.dilation,
+                                norm_layer=norm_layer))
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def _forward_impl(self, x: Tensor) -> Tensor:
+        # See note [TorchScript super()]
         x = self.conv1(x)
         x = self.bn1(x)
-        x = self.activ(x)
+        x = self.relu(x)
         x = self.maxpool(x)
 
         x = self.layer1(x)
@@ -293,19 +250,19 @@ class ResNet(BaseModel):
         x = self.layer4(x)
 
         x = self.avgpool(x)
-        feature_vectors = x.view(x.size(0), -1)
-        x = self.fc(feature_vectors)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
 
-        if self.produce_vectors:
-            return x, feature_vectors
-        else:
-            return x
+        return x
 
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward_impl(x)
+    
     def removable_orphans(self):
         num_removed = 0
         for l_blocks in [self.layer1, self.layer2, self.layer3, self.layer4]:
             for b in l_blocks:
-                if self.block_type == 'Bottleneck':
+                if self.block == Bottleneck:
                     m1, m2, m3 = b.bn1, b.bn2, b.bn3
                     if self.is_all_pruned(m1) or self.is_all_pruned(m2) or self.is_all_pruned(m3):
                         num_removed += self.n_remaining(m1) + self.n_remaining(m2) + self.n_remaining(m3)
@@ -319,7 +276,7 @@ class ResNet(BaseModel):
         num_removed = 0
         for l_blocks in [self.layer1, self.layer2, self.layer3, self.layer4]:
             for b in l_blocks:
-                if self.block_type == 'Bottleneck':
+                if self.block == Bottleneck:
                     m1, m2, m3 = b.bn1, b.bn2, b.bn3
                     if self.is_all_pruned(m1) or self.is_all_pruned(m2) or self.is_all_pruned(m3):
                         num_removed += self.n_remaining(m1) + self.n_remaining(m2) + self.n_remaining(m3)
@@ -335,41 +292,134 @@ class ResNet(BaseModel):
         return num_removed
 
 
-def make_wide_resnet(num_classes, insize):
-    model = ResNetCifar(BasicBlock, [4, 4, 4], width=12, num_classes=num_classes, insize=insize)
+def _resnet(
+    arch: str,
+    block: Type[Union[BasicBlock, Bottleneck]],
+    layers: List[int],
+    pretrained: bool,
+    progress: bool,
+    **kwargs: Any
+) -> ResNet:
+    model = ResNet(block, layers, **kwargs)
+    if pretrained:
+        state_dict = load_state_dict_from_url(model_urls[arch],
+                                              progress=progress)
+        model.load_state_dict(state_dict, strict= False)
     return model
 
-def make_resnet20(num_classes, insize):
-    model = ResNetCifar(BasicBlock, [3, 3, 3], width=1, num_classes=num_classes, insize=insize)
-    return model
 
-def make_resnet32(num_classes, insize):
-    model = ResNetCifar(BasicBlock, [5, 5, 5], width=1, num_classes=num_classes, insize=insize)
-    return model
+def resnet18(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNet-18 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
+                   **kwargs)
 
-def make_resnet50(num_classes, insize):
-    model = ResNet(Bottleneck, [3, 4, 6, 3], num_classes=num_classes, insize=insize)
-    return model
 
-def make_resnet56(num_classes, insize):
-    model = ResNetCifar(BasicBlock, [9, 9, 9], width=1, num_classes=num_classes, insize=insize)
-    return model
+def resnet34(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNet-34 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet34', BasicBlock, [3, 4, 6, 3], pretrained, progress,
+                   **kwargs)
 
-def make_resnet18(num_classes, insize):
-    model = ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes, insize=insize)
-    return model
 
-def make_resnet101(num_classes, insize):
-    model = ResNet(Bottleneck, [3, 4, 23, 3], num_classes=num_classes, insize=insize)
-    return model
+def resnet50(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNet-50 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress,
+                   **kwargs)
 
-def make_resnet110(num_classes, insize):
-    model = ResNetCifar(BasicBlock, [18, 18, 18], width=1, num_classes=num_classes, insize=insize)
-    return model
 
-def make_resnet152(num_classes, insize):
-    model = ResNet(Bottleneck, [3, 8, 36, 3], num_classes=num_classes, insize=insize)
-    return model
+def resnet101(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNet-101 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet101', Bottleneck, [3, 4, 23, 3], pretrained, progress,
+                   **kwargs)
+
+
+def resnet152(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNet-152 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _resnet('resnet152', Bottleneck, [3, 8, 36, 3], pretrained, progress,
+                   **kwargs)
+
+
+def resnext50_32x4d(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNeXt-50 32x4d model from
+    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 4
+    return _resnet('resnext50_32x4d', Bottleneck, [3, 4, 6, 3],
+                   pretrained, progress, **kwargs)
+
+
+def resnext101_32x8d(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""ResNeXt-101 32x8d model from
+    `"Aggregated Residual Transformation for Deep Neural Networks" <https://arxiv.org/pdf/1611.05431.pdf>`_.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    kwargs['groups'] = 32
+    kwargs['width_per_group'] = 8
+    return _resnet('resnext101_32x8d', Bottleneck, [3, 4, 23, 3],
+                   pretrained, progress, **kwargs)
+
+
+def wide_resnet50_2(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""Wide ResNet-50-2 model from
+    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_.
+    The model is the same as ResNet except for the bottleneck number of channels
+    which is twice larger in every block. The number of channels in outer 1x1
+    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
+    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    kwargs['width_per_group'] = 64 * 2
+    return _resnet('wide_resnet50_2', Bottleneck, [3, 4, 6, 3],
+                   pretrained, progress, **kwargs)
+
+
+def wide_resnet101_2(pretrained: bool = False, progress: bool = True, **kwargs: Any) -> ResNet:
+    r"""Wide ResNet-101-2 model from
+    `"Wide Residual Networks" <https://arxiv.org/pdf/1605.07146.pdf>`_.
+    The model is the same as ResNet except for the bottleneck number of channels
+    which is twice larger in every block. The number of channels in outer 1x1
+    convolutions is the same, e.g. last block in ResNet-50 has 2048-512-2048
+    channels, and in Wide ResNet-50-2 has 2048-1024-2048.
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    kwargs['width_per_group'] = 64 * 2
+    return _resnet('wide_resnet101_2', Bottleneck, [3, 4, 23, 3],
+                   pretrained, progress, **kwargs)
+
 
 def get_resnet_model(model, method, num_classes, insize):
     """Returns the requested model, ready for training/pruning with the specified method.
@@ -381,23 +431,7 @@ def get_resnet_model(model, method, num_classes, insize):
     """
     ModuleInjection.pruning_method = method
     ModuleInjection.prunable_modules = []
-    if model == 'wrn':
-        net = make_wide_resnet(num_classes, insize)
-    elif model == 'r18':
-        net = make_resnet18(num_classes, insize)
-    elif model == 'r20':
-        net = make_resnet20(num_classes, insize)
-    elif model == 'r32':
-        net = make_resnet32(num_classes, insize)
-    elif model == 'r50':
-        net = make_resnet50(num_classes, insize)
-    elif model == 'r56':
-        net = make_resnet56(num_classes, insize)
-    elif model == 'r101':
-        net = make_resnet101(num_classes, insize)
-    elif model == 'r110':
-        net = make_resnet110(num_classes, insize)
-    elif model == 'r152':
-        net = make_resnet152(num_classes, insize)
+    if model == 'r101':
+        net = resnet101(pretrained = True)
     net.prunable_modules = ModuleInjection.prunable_modules
     return net

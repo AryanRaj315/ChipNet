@@ -27,7 +27,7 @@ class ImageNet(Dataset):
     def __getitem__(self, idx):
         image = pil_loader(self.paths[idx])
 #         print(self.paths[idx])
-        label = int(self.label_dict[self.paths[idx].split('/')[6]])
+        label = int(self.label_dict[self.paths[idx].split('/')[6]])-1
 #         print(image.shape)
         if self.transform is not None:
             image = self.transform(image)
