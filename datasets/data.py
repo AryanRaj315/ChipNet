@@ -112,7 +112,7 @@ class DataManager:
 #         train_idx, val_idx = self.get_split()
 #         train_sampler = SubsetRandomSampler(train_idx)
 #         val_sampler = SubsetRandomSampler(val_idx)
-        print(len(trainset))
+        print(len(trainset), 'valset')
         train_loader = data.DataLoader(trainset, batch_size = self.batch_size, num_workers=self.workers, shuffle = True, pin_memory=True)
         val_loader = data.DataLoader(valset, self.batch_size, num_workers=self.workers, shuffle = False, pin_memory=True)
         test_loader = data.DataLoader(testset, self.batch_size, num_workers=self.workers, shuffle=False, pin_memory=False)
